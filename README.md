@@ -1,1 +1,0 @@
-https://miro.com/app/board/uXjVGLKQekw=/?share_link_id=652707015484
