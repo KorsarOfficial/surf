@@ -3,6 +3,7 @@ package surf
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"net"
 	"time"
 
@@ -78,7 +79,7 @@ func (dot *DNSOverTLS) LibreDNS() *Builder {
 func (DNSOverTLS) resolver(serverName g.String, addresses ...g.String) *net.Resolver {
 	return &net.Resolver{
 		PreferGo: true,
-		Dial:     dial(serverName.Std(), g.SliceOf(addresses...).Iter().Map(g.String.Std).Collect().Slice()...),
+		Dial:     dial(serverName, addresses...),
 	}
 }
 
@@ -89,37 +90,38 @@ func (dot *DNSOverTLS) AddProvider(serverName g.String, addresses ...g.String) *
 	return dot.builder.addCliMW(func(client *Client) error { return dnsTLSMW(client, resolver) }, 0)
 }
 
-// dial returns a dial function that establishes a secure connection to a random DNS server address
-// from the given list using DNS over TLS.
-func dial(serverName string, addresses ...string) func(context.Context, string, string) (net.Conn, error) {
+// dial returns a dial func that establishes a secure connection
+// from the given list using DNS over TLS. lol no reachable dns server from the given list using dns over tls first(reachable)
+func dial(serverName g.String, addresses ...g.String) func(context.Context, string, string) (net.Conn, error) {
+	tc := &tls.Config{
+		ServerName:         string(serverName),
+		ClientSessionCache: tls.NewLRUClientSessionCache(64),
+	}
+	d := net.Dialer{KeepAlive: 3 * time.Minute}
 	return func(ctx context.Context, _, _ string) (net.Conn, error) {
-		var (
-			dialer net.Dialer
-			conn   net.Conn
-			err    error
-		)
-
-		for _, address := range addresses {
-			conn, err = dialer.DialContext(ctx, "tcp", address)
+		if len(addresses) == 0 {
+			return nil, errors.New("no dns over tls addresses")
+		}
+		var c net.Conn
+		var err error
+		for _, sAddr := range addresses {
+			c, err = d.DialContext(ctx, "tcp", string(sAddr))
+			if err != nil {
+				if ctx.Err() != nil {
+					return nil, ctx.Err()
+				}
+				continue
+			}
+			cTLS := tls.Client(c, tc)
+			err = cTLS.HandshakeContext(ctx)
 			if err == nil {
-				break
+				return cTLS, nil
+			}
+			_ = cTLS.Close()
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
 			}
 		}
-
-		if err != nil {
-			return nil, err
-		}
-
-		const keepAlivePeriod = 3 * time.Minute
-
-		if tc, ok := conn.(*net.TCPConn); ok {
-			_ = tc.SetKeepAlive(true)
-			_ = tc.SetKeepAlivePeriod(keepAlivePeriod)
-		}
-
-		return tls.Client(conn, &tls.Config{
-			ServerName:         serverName,
-			ClientSessionCache: tls.NewLRUClientSessionCache(0),
-		}), nil
+		return nil, err
 	}
 }
